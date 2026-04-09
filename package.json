@@ -1,0 +1,33 @@
+{
+  "name": "relay-tor-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A privacy-first TypeScript CLI for Relay with explicit proxy routing for API and EVM flows.",
+  "bin": {
+    "relay": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "dev": "tsx src/cli.ts",
+    "relay": "node dist/cli.js",
+    "test": "node --import tsx --test test/**/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
+    "proxy-agent": "^6.5.0",
+    "prompts": "^2.4.2",
+    "viem": "^2.21.55"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

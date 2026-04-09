@@ -121,6 +121,8 @@ export interface RelayStatusResponse {
 
 export interface StoredConfig {
   privateKeyEnvVar?: string;
+  mnemonicEnvVar?: string;
+  mnemonicAddressIndex?: number;
   proxyUrl?: string;
 }
 
@@ -164,6 +166,7 @@ export interface BridgeOptions {
   quoteOnly?: boolean;
   yes?: boolean;
   usePermit?: boolean;
+  strictGasless?: boolean;
   useExternalLiquidity?: boolean;
   topupGas?: boolean;
   topupGasAmount?: string;

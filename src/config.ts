@@ -4,16 +4,25 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { isAddress, type Hex } from 'viem';
+import {
+  mnemonicToAccount,
+  privateKeyToAccount,
+  type LocalAccount
+} from 'viem/accounts';
 
 import {
   CONFIG_DIRECTORY_NAME,
   CONFIG_FILE_NAME,
-  DEFAULT_PRIVATE_KEY_ENV_VAR
+  DEFAULT_MNEMONIC_ADDRESS_INDEX,
+  DEFAULT_MNEMONIC_ENV_VAR,
+  DEFAULT_PRIVATE_KEY_ENV_VAR,
+  MNEMONIC_ADDRESS_INDEX_ENV_VAR
 } from './constants.js';
 import type { StoredConfig } from './types.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/i;
 const PRIVATE_KEY_PATTERN = /^(0x)?[0-9a-fA-F]{64}$/;
+const MNEMONIC_PATTERN = /^([^\s]+\s+){11,23}[^\s]+$/;
 
 function getConfigDirectory(): string {
   const configHome =
@@ -83,6 +92,37 @@ export async function unsetPrivateKeyEnvVar(): Promise<void> {
   await writeConfig(config);
 }
 
+export async function setMnemonicEnvVar(envVarName: string): Promise<void> {
+  if (!ENV_VAR_NAME_PATTERN.test(envVarName)) {
+    throw new Error(
+      `Invalid env var name "${envVarName}". Use a shell-safe variable name like RELAY_MNEMONIC.`
+    );
+  }
+
+  const config = await readConfig();
+  config.mnemonicEnvVar = envVarName;
+  await writeConfig(config);
+}
+
+export async function unsetMnemonicEnvVar(): Promise<void> {
+  const config = await readConfig();
+  delete config.mnemonicEnvVar;
+  await writeConfig(config);
+}
+
+export async function setMnemonicAddressIndex(index: number): Promise<void> {
+  validateMnemonicAddressIndex(index);
+  const config = await readConfig();
+  config.mnemonicAddressIndex = index;
+  await writeConfig(config);
+}
+
+export async function unsetMnemonicAddressIndex(): Promise<void> {
+  const config = await readConfig();
+  delete config.mnemonicAddressIndex;
+  await writeConfig(config);
+}
+
 export async function setConfiguredProxyUrl(proxyUrl: string): Promise<void> {
   const config = await readConfig();
   config.proxyUrl = proxyUrl;
@@ -108,6 +148,114 @@ export async function getPrivateKeyEnvVarName(): Promise<string> {
   return config.privateKeyEnvVar ?? DEFAULT_PRIVATE_KEY_ENV_VAR;
 }
 
+export async function getMnemonicEnvVarName(): Promise<string> {
+  const config = await readConfig();
+  return config.mnemonicEnvVar ?? DEFAULT_MNEMONIC_ENV_VAR;
+}
+
+export async function getMnemonicAddressIndex(): Promise<number> {
+  const value = process.env[MNEMONIC_ADDRESS_INDEX_ENV_VAR];
+  if (value !== undefined) {
+    return parseMnemonicAddressIndex(value, MNEMONIC_ADDRESS_INDEX_ENV_VAR);
+  }
+
+  const config = await readConfig();
+  return config.mnemonicAddressIndex ?? DEFAULT_MNEMONIC_ADDRESS_INDEX;
+}
+
+function validateMnemonicAddressIndex(index: number): void {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error('Mnemonic address index must be a non-negative integer.');
+  }
+}
+
+function parseMnemonicAddressIndex(
+  value: string,
+  sourceLabel: string
+): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `The value in ${sourceLabel} must be a non-negative integer.`
+    );
+  }
+
+  return parsed;
+}
+
+function normalizePrivateKey(value: string, envVarName: string): Hex {
+  if (!PRIVATE_KEY_PATTERN.test(value)) {
+    throw new Error(
+      `The value in ${envVarName} is not a valid 32-byte hex private key.`
+    );
+  }
+
+  return (value.startsWith('0x') ? value : `0x${value}`) as Hex;
+}
+
+export function deriveAccountFromMnemonic(
+  mnemonic: string,
+  envVarName: string,
+  addressIndex = DEFAULT_MNEMONIC_ADDRESS_INDEX
+) {
+  const normalized = mnemonic.trim().replace(/\s+/g, ' ');
+  if (!MNEMONIC_PATTERN.test(normalized)) {
+    throw new Error(
+      `The value in ${envVarName} does not look like a valid BIP-39 seed phrase.`
+    );
+  }
+
+  try {
+    validateMnemonicAddressIndex(addressIndex);
+    return mnemonicToAccount(normalized, { addressIndex });
+  } catch {
+    throw new Error(
+      `The value in ${envVarName} could not be parsed as a valid BIP-39 seed phrase.`
+    );
+  }
+}
+
+export interface ResolvedSigner {
+  envVarName: string;
+  kind: 'private_key' | 'mnemonic';
+  account: LocalAccount;
+  addressIndex?: number;
+}
+
+export async function resolveConfiguredSigner(): Promise<ResolvedSigner> {
+  const privateKeyEnvVarName = await getPrivateKeyEnvVarName();
+  const privateKeyValue = process.env[privateKeyEnvVarName];
+
+  if (privateKeyValue) {
+    const privateKey = normalizePrivateKey(privateKeyValue, privateKeyEnvVarName);
+    return {
+      envVarName: privateKeyEnvVarName,
+      kind: 'private_key',
+      account: privateKeyToAccount(privateKey)
+    };
+  }
+
+  const mnemonicEnvVarName = await getMnemonicEnvVarName();
+  const mnemonicValue = process.env[mnemonicEnvVarName];
+  if (mnemonicValue) {
+    const addressIndex = await getMnemonicAddressIndex();
+    return {
+      envVarName: mnemonicEnvVarName,
+      kind: 'mnemonic',
+      account: deriveAccountFromMnemonic(
+        mnemonicValue,
+        mnemonicEnvVarName,
+        addressIndex
+      ),
+      addressIndex
+    };
+  }
+
+  throw new Error(
+    `Missing signing credentials. Export ${privateKeyEnvVarName} for a raw private key or ${mnemonicEnvVarName} for a BIP-39 seed phrase before running a signing command.`
+  );
+}
+
 export async function resolveConfiguredPrivateKey(): Promise<{
   envVarName: string;
   privateKey: Hex;
@@ -121,14 +269,43 @@ export async function resolveConfiguredPrivateKey(): Promise<{
     );
   }
 
-  if (!PRIVATE_KEY_PATTERN.test(value)) {
-    throw new Error(
-      `The value in ${envVarName} is not a valid 32-byte hex private key.`
-    );
+  return { envVarName, privateKey: normalizePrivateKey(value, envVarName) };
+}
+
+export async function tryResolveConfiguredSigner(): Promise<
+  ResolvedSigner | undefined
+> {
+  const privateKeyEnvVarName = await getPrivateKeyEnvVarName();
+  const privateKeyValue = process.env[privateKeyEnvVarName];
+
+  if (privateKeyValue) {
+    return {
+      envVarName: privateKeyEnvVarName,
+      kind: 'private_key',
+      account: privateKeyToAccount(
+        normalizePrivateKey(privateKeyValue, privateKeyEnvVarName)
+      )
+    };
   }
 
-  const normalized = (value.startsWith('0x') ? value : `0x${value}`) as Hex;
-  return { envVarName, privateKey: normalized };
+  const mnemonicEnvVarName = await getMnemonicEnvVarName();
+  const mnemonicValue = process.env[mnemonicEnvVarName];
+
+  if (mnemonicValue) {
+    const addressIndex = await getMnemonicAddressIndex();
+    return {
+      envVarName: mnemonicEnvVarName,
+      kind: 'mnemonic',
+      account: deriveAccountFromMnemonic(
+        mnemonicValue,
+        mnemonicEnvVarName,
+        addressIndex
+      ),
+      addressIndex
+    };
+  }
+
+  return undefined;
 }
 
 export async function tryResolveConfiguredPrivateKey(): Promise<
@@ -145,14 +322,7 @@ export async function tryResolveConfiguredPrivateKey(): Promise<
     return undefined;
   }
 
-  if (!PRIVATE_KEY_PATTERN.test(value)) {
-    throw new Error(
-      `The value in ${envVarName} is not a valid 32-byte hex private key.`
-    );
-  }
-
-  const normalized = (value.startsWith('0x') ? value : `0x${value}`) as Hex;
-  return { envVarName, privateKey: normalized };
+  return { envVarName, privateKey: normalizePrivateKey(value, envVarName) };
 }
 
 export function maskAddress(address: string): string {

@@ -8,7 +8,7 @@ Every outbound HTTP request from the CLI is routed through an explicit proxy. Th
 
 - Makes common EVM bridge flows simple with a single `bridge` command
 - Exposes the full Relay API surface through a spec-driven `api` command
-- Keeps private keys out of config files by storing only the environment variable name that should be used
+- Keeps signing secrets out of config files by storing only the environment variable names that should be used
 
 ## Requirements
 
@@ -32,12 +32,33 @@ For local development:
 pnpm dev -- --help
 ```
 
-## Private key setup
+## Signing setup
 
-The CLI never stores a raw private key. It only stores the env var name to read from.
+The CLI never stores a raw private key or seed phrase. It only stores the env var names to read from.
 
 ```bash
 export RELAY_PRIVATE_KEY=0xyour_private_key
+pnpm relay -- config show
+```
+
+You can also use a BIP-39 seed phrase. The CLI derives the first standard EVM account locally:
+
+```bash
+export RELAY_MNEMONIC="word1 word2 word3 ..."
+pnpm relay -- config show
+```
+
+To inspect which addresses your mnemonic maps to locally:
+
+```bash
+pnpm relay -- wallet derive
+pnpm relay -- wallet derive --start-index 0 --count 5
+```
+
+To make the CLI use a different derived address index:
+
+```bash
+pnpm relay -- config set-mnemonic-index 1
 pnpm relay -- config show
 ```
 
@@ -48,10 +69,19 @@ pnpm relay -- config set-private-key-env WALLET_PK
 export WALLET_PK=0xyour_private_key
 ```
 
+To point the CLI at a different mnemonic env var:
+
+```bash
+pnpm relay -- config set-mnemonic-env WALLET_SEED
+export WALLET_SEED="word1 word2 word3 ..."
+```
+
 To reset back to the default env var name:
 
 ```bash
 pnpm relay -- config unset-private-key-env
+pnpm relay -- config unset-mnemonic-env
+pnpm relay -- config unset-mnemonic-index
 ```
 
 ## Proxy setup
@@ -77,16 +107,35 @@ Preview a bridge quote:
 pnpm relay -- bridge --from base --to optimism --token usdc --amount 25 --quote-only
 ```
 
+The `bridge` command also accepts a compact shorthand:
+
+```bash
+pnpm relay -- bridge arbitrum:weth ethereum:eth 0.01 --quote-only
+```
+
 Preview a quote with a specific wallet context, without needing a configured private key:
 
 ```bash
 pnpm relay -- bridge --from arbitrum --to ethereum --token weth --amount 0.01 --quote-only --wallet 0xYourWalletAddress
 ```
 
-Bridge and execute the steps with your configured private key:
+Bridge and execute the steps with your configured signer:
 
 ```bash
 pnpm relay -- bridge --from ethereum --to base --token eth --amount 0.05
+```
+
+When you want Relay's permit-based route for the most gas-efficient ERC-20 path, add:
+
+```bash
+pnpm relay -- bridge arbitrum:weth ethereum:eth 0.01 --use-permit
+```
+
+When you want the CLI to refuse any route that still needs an onchain wallet transaction, add strict gasless mode:
+
+```bash
+pnpm relay -- bridge arbitrum:weth ethereum:eth 0.01 --quote-only --strict-gasless
+pnpm relay -- bridge arbitrum:weth ethereum:eth 0.01 --use-permit --strict-gasless
 ```
 
 Check status:
@@ -125,7 +174,10 @@ pnpm relay -- api call POST /quote/v2 --body '{"user":"0x...","originChainId":84
 ## Security notes
 
 - The CLI fails closed: if the configured proxy is unavailable, requests fail instead of falling back to a direct connection.
-- The `config` command never stores a private key. It can store a proxy URL, and CLI output redacts embedded proxy credentials.
-- `bridge --quote-only` does not require a private key. If you omit `--wallet`, the CLI uses a placeholder wallet context for the quote.
+- The `config` command never stores a private key or seed phrase. It can store a proxy URL, and CLI output redacts embedded proxy credentials.
+- `bridge --quote-only` does not require signing credentials. If you omit `--wallet`, the CLI uses a placeholder wallet context for the quote.
 - `proxy check` helps distinguish between “the proxy is down” and “Relay is rejecting the current proxy exit”.
+- Permit-based execution is now followed end-to-end, including any follow-up steps returned by Relay after you submit a permit signature.
+- Relay does not make every ERC-20 fully gasless. Their docs call out USDC as fully gasless, while other ERC-20s can still require a one-time approval transaction or sponsored execution.
+- `bridge --strict-gasless` rejects any route that still requires an onchain wallet transaction in the current quote, and it keeps enforcing that after permit submission too.
 - Use `https` endpoints and a dedicated wallet for automation.

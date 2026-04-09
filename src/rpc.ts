@@ -3,10 +3,9 @@ import {
   createWalletClient,
   custom,
   defineChain,
-  type Chain,
-  type Hex
+  type Chain
 } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
+import type { LocalAccount } from 'viem/accounts';
 
 import { ProxyHttpClient } from './proxy.js';
 import type { RelayChain } from './types.js';
@@ -74,16 +73,15 @@ function relayChainToViemChain(chain: RelayChain): Chain {
 
 export function createChainClients(options: {
   chain: RelayChain;
-  privateKey: Hex;
+  account: LocalAccount;
   http: ProxyHttpClient;
 }) {
-  const account = privateKeyToAccount(options.privateKey);
   const chain = relayChainToViemChain(options.chain);
   const provider = new ProxyEip1193Provider(options.http, options.chain.httpRpcUrl);
   const transport = custom(provider as never);
 
   const walletClient = createWalletClient({
-    account,
+    account: options.account,
     chain,
     transport
   });
@@ -94,7 +92,7 @@ export function createChainClients(options: {
   });
 
   return {
-    account,
+    account: options.account,
     chain,
     walletClient,
     publicClient

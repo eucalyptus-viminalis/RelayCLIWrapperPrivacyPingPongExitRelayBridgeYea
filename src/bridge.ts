@@ -1,11 +1,12 @@
 import prompts, { type PromptObject } from 'prompts';
 import {
+  formatUnits,
   isAddress,
   parseUnits,
   type Address,
   type Hex
 } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
+import type { LocalAccount } from 'viem/accounts';
 
 import {
   DEAD_ADDRESS,
@@ -32,6 +33,7 @@ import type {
   RelayChain,
   RelayChainCurrency,
   RelayQuoteResponse,
+  RelayStep,
   RelaySignatureStepData,
   RelayStatusResponse,
   RelayStepCheck,
@@ -54,10 +56,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function runBridge(
   relay: RelayClient,
   options: BridgeOptions,
-  privateKey: Hex | undefined,
+  account: LocalAccount | undefined,
   outputJson = false
 ): Promise<void> {
-  const account = privateKey ? privateKeyToAccount(privateKey) : undefined;
   validateBridgeInputsBeforeNetwork(options);
   const { chains } = await relay.getChains();
   const inputs = await resolveBridgeInputs(
@@ -86,6 +87,9 @@ export async function runBridge(
   };
 
   const quote = await relay.quoteV2(stripUndefined(quoteRequest));
+  const strictGaslessBlocker = options.strictGasless
+    ? findStrictGaslessBlocker(quote.steps, chains)
+    : undefined;
 
   if (outputJson) {
     console.log(JSON.stringify(quote, null, 2));
@@ -104,7 +108,7 @@ export async function runBridge(
         'proxy'
       )}`
     );
-    if (!privateKey) {
+    if (!account) {
       console.log(
         `${label('Mode:')} ${dim(
           inputs.userAddress.toLowerCase() === DEAD_ADDRESS.toLowerCase()
@@ -113,17 +117,37 @@ export async function runBridge(
         )}`
       );
     }
+
+    if (options.strictGasless && !strictGaslessBlocker) {
+      console.log(
+        `${label('Strict gasless:')} ${success(
+          'No direct onchain wallet transaction steps in the current quote.'
+        )}`
+      );
+    }
+  }
+
+  if (strictGaslessBlocker) {
+    throw createStrictGaslessBlockerError(strictGaslessBlocker, options);
   }
 
   if (options.quoteOnly) {
     return;
   }
 
-  if (!privateKey) {
+  if (!account) {
     throw new Error(
-      'Missing private key. Export RELAY_PRIVATE_KEY in your shell before running a signing command.'
+      'Missing signing credentials. Export RELAY_PRIVATE_KEY or RELAY_MNEMONIC before running a signing command.'
     );
   }
+
+  await ensureSufficientNativeBalanceForQuoteSteps(
+    relay,
+    quote,
+    chains,
+    account,
+    options
+  );
 
   if (!options.yes) {
     const confirmation = await prompts({
@@ -139,7 +163,160 @@ export async function runBridge(
     }
   }
 
-  await executeQuoteSteps(relay, quote, chains, privateKey, outputJson);
+  await executeQuoteSteps(relay, quote, chains, account, options, outputJson);
+}
+
+async function ensureSufficientNativeBalanceForQuoteSteps(
+  relay: RelayClient,
+  quote: RelayQuoteResponse,
+  chains: RelayChain[],
+  account: LocalAccount,
+  options: BridgeOptions
+): Promise<void> {
+  const actionable = findFirstActionableTransactionStep(quote.steps);
+  if (!actionable) {
+    return;
+  }
+
+  const chain = chains.find(
+    (candidate) => candidate.id === actionable.item.data.chainId
+  );
+  if (!chain) {
+    return;
+  }
+
+  const clients = createChainClients({
+    chain,
+    account,
+    http: relay.http
+  });
+  const balance = await clients.publicClient.getBalance({
+    address: account.address
+  });
+  const required = estimateNativeRequired(actionable.item.data);
+
+  if (balance >= required) {
+    return;
+  }
+
+  throw createInsufficientNativeBalanceError(
+    chain,
+    actionable.step,
+    balance,
+    required,
+    options
+  );
+}
+
+function findFirstActionableTransactionStep(
+  steps: RelayStep[]
+):
+  | {
+      step: RelayStep;
+      item: RelayStepItem & { data: RelayTransactionStepData };
+    }
+  | undefined {
+  for (const step of steps) {
+    if (step.kind !== 'transaction') {
+      continue;
+    }
+
+    for (const item of step.items ?? []) {
+      if (item.status === 'complete') {
+        continue;
+      }
+
+      const data = item.data as RelayTransactionStepData | undefined;
+      if (!data?.chainId || !data.to) {
+        continue;
+      }
+
+      return {
+        step,
+        item: item as RelayStepItem & { data: RelayTransactionStepData }
+      };
+    }
+  }
+
+  return undefined;
+}
+
+export function findStrictGaslessBlocker(
+  steps: RelayStep[],
+  chains: RelayChain[]
+):
+  | {
+      step: RelayStep;
+      item: RelayStepItem & { data: RelayTransactionStepData };
+      chain?: RelayChain;
+    }
+  | undefined {
+  const actionable = findFirstActionableTransactionStep(steps);
+  if (!actionable) {
+    return undefined;
+  }
+
+  return {
+    ...actionable,
+    chain: chains.find(
+      (candidate) => candidate.id === actionable.item.data.chainId
+    )
+  };
+}
+
+function estimateNativeRequired(data: RelayTransactionStepData): bigint {
+  const value = BigInt(data.value ?? '0');
+  const gas = data.gas ? BigInt(data.gas) : 0n;
+  const gasPrice = data.gasPrice
+    ? BigInt(data.gasPrice)
+    : data.maxFeePerGas
+      ? BigInt(data.maxFeePerGas)
+      : 0n;
+
+  return value + gas * gasPrice;
+}
+
+function createInsufficientNativeBalanceError(
+  chain: RelayChain,
+  step: RelayStep,
+  balance: bigint,
+  required: bigint,
+  options: BridgeOptions
+): Error {
+  const decimals = chain.currency?.decimals ?? 18;
+  const gasToken = chain.currency?.symbol ?? 'native gas token';
+  const balanceText = formatUnits(balance, decimals);
+  const requiredText = formatUnits(required, decimals);
+  const isApprovalStep =
+    step.id.toLowerCase().includes('approve') ||
+    step.action.toLowerCase().includes('approve') ||
+    step.description.toLowerCase().includes('approve');
+
+  if (isApprovalStep && options.usePermit) {
+    return new Error(
+      `Route is not fully gasless from the current wallet state. Relay still returned an approval step on ${chain.displayName}, and submitting that transaction needs ${gasToken} for gas.\n\nWallet balance: ${balanceText} ${gasToken}\nEstimated needed for the next step: ${requiredText} ${gasToken}\n\nFor WETH and many ERC-20s, Relay's docs say a one-time approval can still be required. Without ${chain.displayName} ${gasToken} or a sponsored execution setup, this route cannot complete from a fresh wallet.`
+    );
+  }
+
+  return new Error(
+    `The next Relay step needs ${gasToken} on ${chain.displayName}, but the wallet does not have enough native gas.\n\nWallet balance: ${balanceText} ${gasToken}\nEstimated needed for the next step: ${requiredText} ${gasToken}`
+  );
+}
+
+function createStrictGaslessBlockerError(
+  blocker: NonNullable<ReturnType<typeof findStrictGaslessBlocker>>,
+  options: BridgeOptions
+): Error {
+  const chainName = blocker.chain?.displayName ?? `chain ${blocker.item.data.chainId}`;
+  const gasToken = blocker.chain?.currency?.symbol ?? 'native gas token';
+  const detail = `${blocker.step.id}: ${blocker.step.action}`;
+  const extra = options.usePermit
+    ? `Relay's permit-based path can still surface an approval or deposit transaction for many ERC-20s. Their docs call out USDC as fully gasless, while tokens like WETH can still require native gas or sponsorship.`
+    : `This route still requires a wallet transaction, so it is not compatible with a zero-native-gas wallet.`;
+
+  return new Error(
+    `Route is not strictly gasless. Relay still requires an onchain wallet transaction on ${chainName} before completion.\n\nNext transaction step: ${detail}\nGas token required: ${gasToken}\n\n${extra}`
+  );
 }
 
 async function resolveBridgeInputs(
@@ -410,12 +587,31 @@ async function executeQuoteSteps(
   relay: RelayClient,
   quote: RelayQuoteResponse,
   chains: RelayChain[],
-  privateKey: Hex,
+  account: LocalAccount,
+  options: BridgeOptions,
   outputJson: boolean
 ): Promise<void> {
+  await executeRelaySteps(relay, quote.steps, chains, account, options, outputJson);
+}
+
+async function executeRelaySteps(
+  relay: RelayClient,
+  steps: RelayStep[],
+  chains: RelayChain[],
+  account: LocalAccount,
+  options: BridgeOptions,
+  outputJson: boolean
+): Promise<void> {
+  if (options.strictGasless) {
+    const blocker = findStrictGaslessBlocker(steps, chains);
+    if (blocker) {
+      throw createStrictGaslessBlockerError(blocker, options);
+    }
+  }
+
   const chainCache = new Map<number, ReturnType<typeof createChainClients>>();
 
-  for (const step of quote.steps) {
+  for (const step of steps) {
     const items = step.items ?? [];
     if (items.length === 0) {
       continue;
@@ -434,7 +630,9 @@ async function executeQuoteSteps(
           relay,
           chains,
           chainCache,
-          privateKey,
+          account,
+          step.id,
+          options,
           item,
           outputJson
         );
@@ -443,10 +641,25 @@ async function executeQuoteSteps(
           console.log(`${label('Submitted:')} ${txHash}`);
         }
       } else if (step.kind === 'signature') {
-        const signature = await submitSignatureStep(relay, privateKey, item);
+        const { signature, nextSteps } = await submitSignatureStep(
+          relay,
+          account,
+          item
+        );
 
         if (!outputJson) {
           console.log(`${label('Signed:')} ${signature.slice(0, 14)}...`);
+        }
+
+        if (nextSteps.length > 0) {
+          await executeRelaySteps(
+            relay,
+            nextSteps,
+            chains,
+            account,
+            options,
+            outputJson
+          );
         }
       } else {
         throw new Error(`Unsupported step kind: ${step.kind}`);
@@ -472,7 +685,9 @@ async function submitTransactionStep(
   relay: RelayClient,
   chains: RelayChain[],
   chainCache: Map<number, ReturnType<typeof createChainClients>>,
-  privateKey: Hex,
+  account: LocalAccount,
+  stepId: string,
+  options: BridgeOptions,
   item: RelayStepItem,
   outputJson: boolean
 ): Promise<string> {
@@ -490,7 +705,7 @@ async function submitTransactionStep(
   if (!clients) {
     clients = createChainClients({
       chain,
-      privateKey,
+      account,
       http: relay.http
     });
     chainCache.set(chain.id, clients);
@@ -514,7 +729,12 @@ async function submitTransactionStep(
         })
   };
 
-  const txHash = await clients.walletClient.sendTransaction(request);
+  let txHash: Hex;
+  try {
+    txHash = await clients.walletClient.sendTransaction(request);
+  } catch (error) {
+    throw explainNativeGasFailure(error, chain, stepId, options);
+  }
 
   await clients.publicClient.waitForTransactionReceipt({
     hash: txHash
@@ -531,10 +751,9 @@ async function submitTransactionStep(
 
 async function submitSignatureStep(
   relay: RelayClient,
-  privateKey: Hex,
+  account: LocalAccount,
   item: RelayStepItem
-): Promise<string> {
-  const account = privateKeyToAccount(privateKey);
+): Promise<{ signature: string; nextSteps: RelayStep[] }> {
   const signatureData = item.data as RelaySignatureStepData | undefined;
   if (!signatureData?.sign) {
     throw new Error('Relay returned a signature step without sign payload.');
@@ -559,15 +778,23 @@ async function submitSignatureStep(
         });
 
   if (signatureData.post) {
-    await relay.request({
+    const response = (await relay.request({
       method: signatureData.post.method,
       path: signatureData.post.endpoint,
       query: { signature },
       body: signatureData.post.body
-    });
+    })) as { steps?: RelayStep[] };
+
+    return {
+      signature,
+      nextSteps: response.steps ?? []
+    };
   }
 
-  return signature;
+  return {
+    signature,
+    nextSteps: []
+  };
 }
 
 async function waitForCompletion(
@@ -633,6 +860,25 @@ function stripUndefined<T extends Record<string, unknown>>(value: T): T {
 
 function raise(message: string): never {
   throw new Error(message);
+}
+
+function explainNativeGasFailure(
+  error: unknown,
+  chain: RelayChain,
+  stepId: string,
+  options: BridgeOptions
+): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/exceeds the balance|insufficient funds/i.test(message)) {
+    return error instanceof Error ? error : new Error(message);
+  }
+
+  const gasToken = chain.currency?.symbol ?? 'native gas';
+  const hint = options.usePermit
+    ? `This ${stepId} step still needs ${gasToken} on ${chain.displayName}. Relay's permit-based path is not fully gasless for every ERC-20. The docs say USDC is fully gasless, while other ERC-20s can still require a one-time approval transaction or sponsorship.`
+    : `This ${stepId} step needs ${gasToken} on ${chain.displayName}. Try rerunning with --use-permit for Relay's permit-based route when supported. For tokens like WETH, Relay may still require a one-time approval transaction or sponsored execution.`;
+
+  return new Error(`${message}\n\n${hint}`);
 }
 
 function validateBridgeInputsBeforeNetwork(options: BridgeOptions): void {

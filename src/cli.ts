@@ -7,14 +7,21 @@ import pc from 'picocolors';
 import { isAddress } from 'viem';
 
 import {
+  deriveAccountFromMnemonic,
   getConfiguredProxyUrl,
+  getMnemonicAddressIndex,
+  getMnemonicEnvVarName,
   getPrivateKeyEnvVarName,
   readConfig,
-  resolveConfiguredPrivateKey,
+  resolveConfiguredSigner,
   setConfiguredProxyUrl,
-  tryResolveConfiguredPrivateKey,
+  setMnemonicAddressIndex,
+  tryResolveConfiguredSigner,
+  setMnemonicEnvVar,
   setPrivateKeyEnvVar,
+  unsetMnemonicAddressIndex,
   unsetConfiguredProxyUrl,
+  unsetMnemonicEnvVar,
   unsetPrivateKeyEnvVar
 } from './config.js';
 import {
@@ -35,6 +42,7 @@ import {
 import { RelayClient } from './relay-client.js';
 import { runBridge } from './bridge.js';
 import { runProxyCheck } from './proxy-check.js';
+import type { BridgeOptions } from './types.js';
 
 const program = new Command();
 
@@ -49,6 +57,9 @@ program
 program
   .command('bridge')
   .description('Quote and execute an EVM bridge flow through Relay.')
+  .argument('[fromRoute]', 'Origin shorthand, for example arbitrum:weth')
+  .argument('[toRoute]', 'Destination shorthand, for example ethereum:eth')
+  .argument('[amountArg]', 'Amount to bridge')
   .option('--from <chain>', 'Origin chain name or chain id')
   .option('--to <chain>', 'Destination chain name or chain id')
   .option('--token <token>', 'Token symbol or address for both sides')
@@ -65,27 +76,37 @@ program
   .option('--quote-only', 'Fetch and display a quote without executing it')
   .option('-y, --yes', 'Skip the confirmation prompt before execution')
   .option('--use-permit', 'Ask Relay for a permit-based path when available')
+  .option(
+    '--strict-gasless',
+    'Fail if Relay requires any onchain wallet transaction for this route'
+  )
   .option('--use-external-liquidity', 'Enable Relay external liquidity routes')
   .option('--topup-gas', 'Request a destination gas top-up when supported')
   .option('--topup-gas-amount <usdDecimal>', 'Destination gas top-up amount in USD decimals')
   .option('--refund-to <address>', 'Refund recipient if execution fails')
   .option('--refund-type <type>', 'Refund chain: origin or destination')
   .option('--slippage-tolerance <bps>', 'Slippage tolerance in basis points')
-  .action(async (options) => {
-    validateBridgeCliOptions(options);
+  .action(async (fromRoute, toRoute, amountArg, options) => {
+    const bridgeOptions = applyBridgeRouteShorthand(
+      options,
+      fromRoute,
+      toRoute,
+      amountArg
+    );
+    validateBridgeCliOptions(bridgeOptions);
     const relay = new RelayClient();
     const globalOptions = program.opts<{ json?: boolean }>();
-    const privateKey = options.quoteOnly
-      ? (await tryResolveConfiguredPrivateKey())?.privateKey
-      : (await resolveConfiguredPrivateKey()).privateKey;
+    const account = bridgeOptions.quoteOnly
+      ? (await tryResolveConfiguredSigner())?.account
+      : (await resolveConfiguredSigner()).account;
 
     await runBridge(
       relay,
       {
-        ...options,
+        ...bridgeOptions,
         json: globalOptions.json
       },
-      privateKey,
+      account,
       Boolean(globalOptions.json)
     );
   });
@@ -94,6 +115,79 @@ const proxyCommand = program
   .command('proxy')
   .alias('tor')
   .description('Proxy diagnostics and helpers. `tor` is kept as a compatibility alias.');
+
+const walletCommand = program
+  .command('wallet')
+  .description('Local wallet helpers for inspecting configured signing credentials.');
+
+walletCommand
+  .command('derive')
+  .description('Derive one or more addresses from the configured mnemonic without making any network calls')
+  .option('--count <count>', 'How many addresses to derive', '5')
+  .option('--start-index <index>', 'First account index to derive', '0')
+  .action(async (options) => {
+    const mnemonicEnvVarName = await getMnemonicEnvVarName();
+    const mnemonic = process.env[mnemonicEnvVarName];
+
+    if (!mnemonic) {
+      throw new Error(
+        `Missing mnemonic. Export ${mnemonicEnvVarName} before deriving wallet addresses.`
+      );
+    }
+
+    const count = parseNonNegativeInteger(options.count, 'count');
+    const startIndex = parseNonNegativeInteger(
+      options.startIndex,
+      'start-index'
+    );
+
+    if (count < 1) {
+      throw new Error('Count must be at least 1.');
+    }
+
+    const derived = Array.from({ length: count }, (_, offset) => {
+      const addressIndex = startIndex + offset;
+      const account = deriveAccountFromMnemonic(
+        mnemonic,
+        mnemonicEnvVarName,
+        addressIndex
+      );
+      return {
+        addressIndex,
+        address: account.address
+      };
+    });
+
+    const activeIndex = await getMnemonicAddressIndex();
+    const globalOptions = program.opts<{ json?: boolean }>();
+
+    if (globalOptions.json) {
+      console.log(
+        JSON.stringify(
+          {
+            mnemonicEnvVar: mnemonicEnvVarName,
+            activeAddressIndex: activeIndex,
+            derived
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    console.log(heading('Derived Wallets'));
+    console.log(`${label('Mnemonic env:')} ${mnemonicEnvVarName}`);
+    console.log(`${label('Active index:')} ${activeIndex}`);
+
+    for (const entry of derived) {
+      const active =
+        entry.addressIndex === activeIndex ? ` ${dim('(active)')}` : '';
+      console.log(
+        `${label(`Index ${entry.addressIndex}:`)} ${entry.address}${active}`
+      );
+    }
+  });
 
 proxyCommand
   .command('check')
@@ -155,7 +249,10 @@ configCommand
   .action(async () => {
     const config = await readConfig();
     const envVarName = await getPrivateKeyEnvVarName();
+    const mnemonicEnvVarName = await getMnemonicEnvVarName();
+    const mnemonicAddressIndex = await getMnemonicAddressIndex();
     const isSet = Boolean(process.env[envVarName]);
+    const mnemonicIsSet = Boolean(process.env[mnemonicEnvVarName]);
     const configuredProxyUrl = await getConfiguredProxyUrl();
     const proxySettings = resolveProxySettings();
 
@@ -163,6 +260,11 @@ configCommand
     console.log(`${label('Config file:')} per-user OS config storage`);
     console.log(`${label('Private key env:')} ${envVarName}`);
     console.log(`${label('Env present:')} ${isSet ? success('yes') : pc.yellow('no')}`);
+    console.log(`${label('Mnemonic env:')} ${mnemonicEnvVarName}`);
+    console.log(
+      `${label('Mnemonic present:')} ${mnemonicIsSet ? success('yes') : pc.yellow('no')}`
+    );
+    console.log(`${label('Mnemonic index:')} ${mnemonicAddressIndex}`);
     console.log(
       `${label('Proxy source:')} ${proxySettings.source.replace('_', ' ')}`
     );
@@ -177,6 +279,16 @@ configCommand
 
     if (config.privateKeyEnvVar) {
       console.log(`${label('Custom override:')} ${config.privateKeyEnvVar}`);
+    }
+
+    if (config.mnemonicEnvVar) {
+      console.log(`${label('Mnemonic override:')} ${config.mnemonicEnvVar}`);
+    }
+
+    if (config.mnemonicAddressIndex !== undefined) {
+      console.log(
+        `${label('Mnemonic index override:')} ${config.mnemonicAddressIndex}`
+      );
     }
 
     if (configuredProxyUrl) {
@@ -196,11 +308,46 @@ configCommand
   });
 
 configCommand
+  .command('set-mnemonic-env')
+  .description('Store which env var the CLI should read for a BIP-39 seed phrase.')
+  .argument('<envVarName>', 'Shell env var name, for example RELAY_MNEMONIC')
+  .action(async (envVarName) => {
+    await setMnemonicEnvVar(envVarName);
+    console.log(success(`Stored mnemonic env var name: ${envVarName}`));
+  });
+
+configCommand
+  .command('set-mnemonic-index')
+  .description('Store which mnemonic address index the CLI should derive and use.')
+  .argument('<index>', 'Non-negative address index, for example 0 or 1')
+  .action(async (index) => {
+    const normalizedIndex = parseNonNegativeInteger(index, 'index');
+    await setMnemonicAddressIndex(normalizedIndex);
+    console.log(success(`Stored mnemonic address index: ${normalizedIndex}`));
+  });
+
+configCommand
   .command('unset-private-key-env')
   .description('Reset private-key lookup to the default RELAY_PRIVATE_KEY env var.')
   .action(async () => {
     await unsetPrivateKeyEnvVar();
     console.log(success('Cleared custom private key env var override.'));
+  });
+
+configCommand
+  .command('unset-mnemonic-env')
+  .description('Reset mnemonic lookup to the default RELAY_MNEMONIC env var.')
+  .action(async () => {
+    await unsetMnemonicEnvVar();
+    console.log(success('Cleared custom mnemonic env var override.'));
+  });
+
+configCommand
+  .command('unset-mnemonic-index')
+  .description('Reset mnemonic address index lookup to the default index 0.')
+  .action(async () => {
+    await unsetMnemonicAddressIndex();
+    console.log(success('Cleared custom mnemonic address index override.'));
   });
 
 configCommand
@@ -399,11 +546,7 @@ function normalizeArgv(argv: string[]): string[] {
   return argv;
 }
 
-function validateBridgeCliOptions(options: {
-  wallet?: string;
-  recipient?: string;
-  refundTo?: string;
-}): void {
+function validateBridgeCliOptions(options: BridgeOptions): void {
   if (options.wallet) {
     validateAddressOption(options.wallet, 'wallet');
   }
@@ -421,4 +564,60 @@ function validateAddressOption(value: string, labelText: string): void {
   if (!isAddress(value.trim())) {
     throw new Error(`Invalid ${labelText} address: ${value}`);
   }
+}
+
+function parseNonNegativeInteger(value: string, labelText: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${labelText} must be a non-negative integer.`);
+  }
+
+  return parsed;
+}
+
+function applyBridgeRouteShorthand(
+  options: {
+    from?: string;
+    to?: string;
+    fromToken?: string;
+    toToken?: string;
+    amount?: string;
+  } & Record<string, unknown>,
+  fromRoute?: string,
+  toRoute?: string,
+  amountArg?: string
+) {
+  const next = { ...options };
+  const origin = parseBridgeRouteToken(fromRoute, 'origin');
+  const destination = parseBridgeRouteToken(toRoute, 'destination');
+
+  next.from ??= origin.chain;
+  next.fromToken ??= origin.token;
+  next.to ??= destination.chain;
+  next.toToken ??= destination.token;
+  next.amount ??= amountArg;
+
+  return next;
+}
+
+function parseBridgeRouteToken(
+  value: string | undefined,
+  labelText: string
+): { chain?: string; token?: string } {
+  if (!value) {
+    return {};
+  }
+
+  const parts = value.split(':');
+  if (parts.length === 1) {
+    return { chain: parts[0] };
+  }
+
+  if (parts.length === 2 && parts[0] && parts[1]) {
+    return { chain: parts[0], token: parts[1] };
+  }
+
+  throw new Error(
+    `Invalid ${labelText} route shorthand: ${value}. Use chain:token, for example arbitrum:weth.`
+  );
 }

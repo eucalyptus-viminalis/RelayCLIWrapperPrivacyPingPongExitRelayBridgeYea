@@ -92,6 +92,12 @@ To store a default proxy URL in your per-user config:
 pnpm relay -- config set-proxy socks5h://127.0.0.1:9150
 ```
 
+For authenticated proxies, prefer an env var instead of storing credentials in config:
+
+```bash
+export RELAY_PROXY_URL="http://user:pass@127.0.0.1:8080"
+```
+
 To remove the stored proxy and fall back to env vars or the default:
 
 ```bash
@@ -110,7 +116,7 @@ pnpm relay -- bridge --from base --to optimism --token usdc --amount 25 --quote-
 Use your exact origin-token balance instead of typing an amount:
 
 ```bash
-pnpm relay -- bridge arbitrum:weth ethereum:eth --max --quote-only
+pnpm relay -- bridge arbitrum:weth ethereum:eth --max --quote-only --wallet 0xYourWalletAddress
 pnpm relay -- bridge arbitrum:weth ethereum:eth --max --use-permit
 ```
 
@@ -181,8 +187,9 @@ pnpm relay -- api call POST /quote/v2 --body '{"user":"0x...","originChainId":84
 ## Security notes
 
 - The CLI fails closed: if the configured proxy is unavailable, requests fail instead of falling back to a direct connection.
-- The `config` command never stores a private key or seed phrase. It can store a proxy URL, and CLI output redacts embedded proxy credentials.
+- The `config` command never stores a private key or seed phrase. It can store an auth-free proxy URL; use env vars for authenticated proxies.
 - `bridge --quote-only` does not require signing credentials. If you omit `--wallet`, the CLI uses a placeholder wallet context for the quote.
+- `bridge --max` uses your full ERC-20 balance. For native-token routes it automatically reserves origin-chain gas instead of trying to spend the entire native balance.
 - `proxy check` helps distinguish between “the proxy is down” and “Relay is rejecting the current proxy exit”.
 - Permit-based execution is now followed end-to-end, including any follow-up steps returned by Relay after you submit a permit signature.
 - Relay does not make every ERC-20 fully gasless. Their docs call out USDC as fully gasless, while other ERC-20s can still require a one-time approval transaction or sponsored execution.

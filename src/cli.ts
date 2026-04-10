@@ -125,7 +125,7 @@ walletCommand
   .command('derive')
   .description('Derive one or more addresses from the configured mnemonic without making any network calls')
   .option('--count <count>', 'How many addresses to derive', '5')
-  .option('--start-index <index>', 'First account index to derive', '0')
+  .option('--start-index <index>', 'First address index to derive', '0')
   .action(async (options) => {
     const mnemonicEnvVarName = await getMnemonicEnvVarName();
     const mnemonic = process.env[mnemonicEnvVarName];
@@ -265,7 +265,7 @@ configCommand
     console.log(
       `${label('Mnemonic present:')} ${mnemonicIsSet ? success('yes') : pc.yellow('no')}`
     );
-    console.log(`${label('Mnemonic index:')} ${mnemonicAddressIndex}`);
+    console.log(`${label('Mnemonic address index:')} ${mnemonicAddressIndex}`);
     console.log(
       `${label('Proxy source:')} ${proxySettings.source.replace('_', ' ')}`
     );
@@ -274,7 +274,7 @@ configCommand
     );
     console.log(
       `${label('Storage:')} ${dim(
-        'Private keys are never stored. Proxy URLs may be stored in per-user config, so CLI output redacts embedded credentials.'
+        'Private keys and seed phrases are never stored. Stored proxy URLs should be auth-free; use env vars for authenticated proxies.'
       )}`
     );
 
@@ -288,7 +288,7 @@ configCommand
 
     if (config.mnemonicAddressIndex !== undefined) {
       console.log(
-        `${label('Mnemonic index override:')} ${config.mnemonicAddressIndex}`
+        `${label('Mnemonic address index override:')} ${config.mnemonicAddressIndex}`
       );
     }
 

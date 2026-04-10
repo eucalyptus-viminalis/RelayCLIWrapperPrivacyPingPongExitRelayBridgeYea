@@ -18,6 +18,7 @@ import {
   DEFAULT_PRIVATE_KEY_ENV_VAR,
   MNEMONIC_ADDRESS_INDEX_ENV_VAR
 } from './constants.js';
+import { proxyUrlHasCredentials } from './proxy.js';
 import type { StoredConfig } from './types.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/i;
@@ -124,6 +125,12 @@ export async function unsetMnemonicAddressIndex(): Promise<void> {
 }
 
 export async function setConfiguredProxyUrl(proxyUrl: string): Promise<void> {
+  if (proxyUrlHasCredentials(proxyUrl)) {
+    throw new Error(
+      'Refusing to store proxy credentials in config. Use RELAY_PROXY_URL or RELAY_TOR_PROXY_URL in your shell for authenticated proxies.'
+    );
+  }
+
   const config = await readConfig();
   config.proxyUrl = proxyUrl;
   await writeConfig(config);

@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { findStrictGaslessBlocker } from '../src/bridge.js';
+import {
+  findStrictGaslessBlocker,
+  reduceNativeMaxAmount
+} from '../src/bridge.js';
 import { deriveAccountFromMnemonic } from '../src/config.js';
 import { findOperation, parseKeyValueEntries } from '../src/openapi.js';
-import { redactProxyUrl, validateProxyUrl } from '../src/proxy.js';
+import {
+  proxyUrlHasCredentials,
+  redactProxyUrl,
+  validateProxyUrl
+} from '../src/proxy.js';
 
 test('findOperation resolves known endpoints', () => {
   const operation = findOperation('post', '/quote/v2');
@@ -36,6 +43,8 @@ test('proxy helpers validate supported proxy URLs and redact credentials', () =>
     redactProxyUrl(validated),
     'http://***:***@127.0.0.1:8080/'
   );
+  assert.equal(proxyUrlHasCredentials(validated), true);
+  assert.equal(proxyUrlHasCredentials('socks5h://127.0.0.1:9050'), false);
 });
 
 test('mnemonic derivation supports account indices', () => {
@@ -91,4 +100,9 @@ test('strict gasless blocker identifies onchain wallet transaction steps', () =>
   assert.ok(blocker);
   assert.equal(blocker?.step.id, 'approve');
   assert.equal(blocker?.chain?.displayName, 'Arbitrum');
+});
+
+test('native max reduction leaves a safety buffer', () => {
+  assert.equal(reduceNativeMaxAmount(1000n, 100n), 894n);
+  assert.equal(reduceNativeMaxAmount(50n, 100n), 0n);
 });

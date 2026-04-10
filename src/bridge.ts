@@ -71,7 +71,7 @@ export async function runBridge(
 ): Promise<void> {
   validateBridgeInputsBeforeNetwork(options);
   const { chains } = await relay.getChains();
-  const inputs = await resolveBridgeInputs(
+  let inputs = await resolveBridgeInputs(
     relay,
     chains,
     options,
@@ -96,7 +96,22 @@ export async function runBridge(
     slippageTolerance: options.slippageTolerance
   };
 
-  const quote = await relay.quoteV2(stripUndefined(quoteRequest));
+  let quote = await relay.quoteV2(stripUndefined(quoteRequest));
+  const adjustedNativeMax = await maybeAdjustNativeMaxQuote({
+    relay,
+    quote,
+    quoteRequest,
+    originChain: inputs.originChain,
+    originCurrency: inputs.originCurrency,
+    userAddress: inputs.userAddress,
+    useMax: Boolean(options.max)
+  });
+  quote = adjustedNativeMax.quote;
+  inputs = {
+    ...inputs,
+    amountWei: adjustedNativeMax.amountWei
+  };
+  quoteRequest.amount = adjustedNativeMax.amountWei.toString();
   const strictGaslessBlocker = options.strictGasless
     ? findStrictGaslessBlocker(quote.steps, chains)
     : undefined;
@@ -286,6 +301,15 @@ function estimateNativeRequired(data: RelayTransactionStepData): bigint {
   return value + gas * gasPrice;
 }
 
+export function reduceNativeMaxAmount(
+  currentAmount: bigint,
+  overshoot: bigint
+): bigint {
+  const safetyBuffer = overshoot / 20n + 1n;
+  const nextAmount = currentAmount - overshoot - safetyBuffer;
+  return nextAmount > 0n ? nextAmount : 0n;
+}
+
 function createInsufficientNativeBalanceError(
   chain: RelayChain,
   step: RelayStep,
@@ -326,6 +350,69 @@ function createStrictGaslessBlockerError(
 
   return new Error(
     `Route is not strictly gasless. Relay still requires an onchain wallet transaction on ${chainName} before completion.\n\nNext transaction step: ${detail}\nGas token required: ${gasToken}\n\n${extra}`
+  );
+}
+
+async function maybeAdjustNativeMaxQuote(options: {
+  relay: RelayClient;
+  quote: RelayQuoteResponse;
+  quoteRequest: Record<string, unknown> & { amount: string };
+  originChain: RelayChain;
+  originCurrency: RelayChainCurrency;
+  userAddress: Address;
+  useMax: boolean;
+}): Promise<{ quote: RelayQuoteResponse; amountWei: bigint }> {
+  let amountWei = BigInt(options.quoteRequest.amount);
+  let quote = options.quote;
+
+  if (
+    !options.useMax ||
+    options.originCurrency.address.toLowerCase() !==
+      NATIVE_TOKEN_ADDRESS.toLowerCase()
+  ) {
+    return { quote, amountWei };
+  }
+
+  const balanceWei = await fetchCurrencyBalanceWei(
+    options.relay,
+    options.originChain,
+    options.originCurrency,
+    options.userAddress
+  );
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const actionable = findFirstActionableTransactionStep(quote.steps);
+    if (!actionable) {
+      return { quote, amountWei };
+    }
+
+    if (actionable.item.data.chainId !== options.originChain.id) {
+      return { quote, amountWei };
+    }
+
+    const requiredWei = estimateNativeRequired(actionable.item.data);
+    if (requiredWei <= balanceWei) {
+      return { quote, amountWei };
+    }
+
+    const overshootWei = requiredWei - balanceWei;
+    const nextAmountWei = reduceNativeMaxAmount(amountWei, overshootWei);
+
+    if (nextAmountWei <= 0n || nextAmountWei >= amountWei) {
+      break;
+    }
+
+    amountWei = nextAmountWei;
+    quote = await options.relay.quoteV2(
+      stripUndefined({
+        ...options.quoteRequest,
+        amount: amountWei.toString()
+      })
+    );
+  }
+
+  throw new Error(
+    `Could not derive a safe max amount for ${options.originCurrency.symbol} on ${options.originChain.displayName}. Try a smaller explicit --amount.`
   );
 }
 
@@ -378,6 +465,12 @@ async function resolveBridgeInputs(
   const explicitWalletAddress = walletInput
     ? normalizeAddress(walletInput, 'wallet')
     : undefined;
+
+  if (options.max && !explicitWalletAddress && !signerAddress) {
+    throw new Error(
+      '--max requires a real wallet context. Set a signer or pass --wallet.'
+    );
+  }
 
   if (
     explicitWalletAddress &&

@@ -219,6 +219,15 @@ export function redactProxyUrl(proxyUrl: string): string {
   }
 }
 
+export function proxyUrlHasCredentials(proxyUrl: string): boolean {
+  try {
+    const parsed = new URL(proxyUrl);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
+  }
+}
+
 function stringifyQueryValue(value: unknown): string {
   if (typeof value === 'string') {
     return value;

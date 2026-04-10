@@ -160,6 +160,7 @@ export interface BridgeOptions {
   fromToken?: string;
   toToken?: string;
   amount?: string;
+  max?: boolean;
   wallet?: string;
   recipient?: string;
   tradeType?: 'EXACT_INPUT' | 'EXACT_OUTPUT' | 'EXPECTED_OUTPUT';

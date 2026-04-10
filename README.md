@@ -107,6 +107,13 @@ Preview a bridge quote:
 pnpm relay -- bridge --from base --to optimism --token usdc --amount 25 --quote-only
 ```
 
+Use your exact origin-token balance instead of typing an amount:
+
+```bash
+pnpm relay -- bridge arbitrum:weth ethereum:eth --max --quote-only
+pnpm relay -- bridge arbitrum:weth ethereum:eth --max --use-permit
+```
+
 The `bridge` command also accepts a compact shorthand:
 
 ```bash

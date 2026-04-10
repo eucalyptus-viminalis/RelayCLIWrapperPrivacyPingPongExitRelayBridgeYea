@@ -98,3 +98,17 @@ export function createChainClients(options: {
     publicClient
   };
 }
+
+export function createChainPublicClient(options: {
+  chain: RelayChain;
+  http: ProxyHttpClient;
+}) {
+  const chain = relayChainToViemChain(options.chain);
+  const provider = new ProxyEip1193Provider(options.http, options.chain.httpRpcUrl);
+  const transport = custom(provider as never);
+
+  return createPublicClient({
+    chain,
+    transport
+  });
+}

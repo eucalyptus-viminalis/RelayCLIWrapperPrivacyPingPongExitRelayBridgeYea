@@ -1,5 +1,6 @@
 import prompts, { type PromptObject } from 'prompts';
 import {
+  encodeFunctionData,
   formatUnits,
   isAddress,
   parseUnits,
@@ -27,7 +28,7 @@ import {
   warn
 } from './format.js';
 import { RelayClient } from './relay-client.js';
-import { createChainClients } from './rpc.js';
+import { createChainClients, createChainPublicClient } from './rpc.js';
 import type {
   BridgeOptions,
   RelayChain,
@@ -52,6 +53,15 @@ interface ResolvedBridgeInputs {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const ERC20_BALANCE_OF_ABI = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [{ name: 'balance', type: 'uint256' }]
+  }
+] as const;
 
 export async function runBridge(
   relay: RelayClient,
@@ -350,7 +360,7 @@ async function resolveBridgeInputs(
   }
 
   const amount = promptValues.amount ?? options.amount;
-  if (!amount) {
+  if (!options.max && !amount) {
     throw new Error('Missing bridge amount.');
   }
 
@@ -405,7 +415,14 @@ async function resolveBridgeInputs(
     originCurrency,
     destinationCurrency,
     recipient,
-    amountWei: parseUnits(amount, originCurrency.decimals),
+    amountWei: await resolveAmountWei(
+      relay,
+      originChain,
+      originCurrency,
+      amount,
+      userAddress,
+      Boolean(options.max)
+    ),
     userAddress
   };
 }
@@ -452,7 +469,7 @@ async function promptForMissingOptions(
     });
   }
 
-  if (!options.amount) {
+  if (!options.amount && !options.max) {
     questions.push({
       type: 'text',
       name: 'amount',
@@ -581,6 +598,71 @@ async function resolveCurrencyOnChain(
   }
 
   return matched;
+}
+
+async function resolveAmountWei(
+  relay: RelayClient,
+  originChain: RelayChain,
+  originCurrency: RelayChainCurrency,
+  amount: string | undefined,
+  userAddress: Address,
+  useMax: boolean
+): Promise<bigint> {
+  if (useMax) {
+    const balance = await fetchCurrencyBalanceWei(
+      relay,
+      originChain,
+      originCurrency,
+      userAddress
+    );
+
+    if (balance <= 0n) {
+      throw new Error(
+        `The wallet has no ${originCurrency.symbol} balance on ${originChain.displayName}.`
+      );
+    }
+
+    return balance;
+  }
+
+  if (!amount) {
+    throw new Error('Missing bridge amount.');
+  }
+
+  return parseUnits(amount, originCurrency.decimals);
+}
+
+async function fetchCurrencyBalanceWei(
+  relay: RelayClient,
+  chain: RelayChain,
+  currency: RelayChainCurrency,
+  userAddress: Address
+): Promise<bigint> {
+  const publicClient = createChainPublicClient({
+    chain,
+    http: relay.http
+  });
+
+  if (currency.address.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase()) {
+    return publicClient.getBalance({ address: userAddress });
+  }
+
+  const result = await publicClient.call({
+    to: currency.address as Address,
+    data: encodeFunctionData({
+      abi: ERC20_BALANCE_OF_ABI,
+      functionName: 'balanceOf',
+      args: [userAddress]
+    })
+  });
+
+  if (!result.data) {
+    throw new Error(
+      `Could not read ${currency.symbol} balance on ${chain.displayName}.`
+    );
+  }
+
+  return BigInt(result.data);
 }
 
 async function executeQuoteSteps(

@@ -66,6 +66,7 @@ program
   .option('--from-token <token>', 'Origin token symbol or address')
   .option('--to-token <token>', 'Destination token symbol or address')
   .option('--amount <amount>', 'Human-readable token amount')
+  .option('--max', "Use the wallet's exact balance for the origin token")
   .option('--wallet <address>', 'Wallet address to use for quote context')
   .option('--recipient <address>', 'Destination recipient address')
   .option(
@@ -547,6 +548,10 @@ function normalizeArgv(argv: string[]): string[] {
 }
 
 function validateBridgeCliOptions(options: BridgeOptions): void {
+  if (options.max && options.amount) {
+    throw new Error('Use either --amount or --max, not both.');
+  }
+
   if (options.wallet) {
     validateAddressOption(options.wallet, 'wallet');
   }

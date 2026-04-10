@@ -106,6 +106,17 @@ pnpm relay -- config unset-proxy
 pnpm relay -- config show
 ```
 
+## JSON output
+
+Most commands support `--json` for machine-readable output:
+
+```bash
+pnpm relay -- --json bridge --from base --to optimism --token usdc --amount 25 --quote-only
+pnpm relay -- --json status 0xrequestid
+pnpm relay -- --json wallet derive
+pnpm relay -- --json token search usdc
+```
+
 ## Examples
 
 Preview a bridge quote:
@@ -190,6 +201,12 @@ Call any Relay endpoint:
 ```bash
 pnpm relay -- api call GET /chains
 pnpm relay -- api call POST /quote/v2 --body '{"user":"0x...","originChainId":8453,"destinationChainId":10,"originCurrency":"0x0000000000000000000000000000000000000000","destinationCurrency":"0x0000000000000000000000000000000000000000","amount":"100000000000000000","tradeType":"EXACT_INPUT"}'
+```
+
+Show a quick summary of the CLI and its privacy model:
+
+```bash
+pnpm relay -- about
 ```
 
 ## Security notes

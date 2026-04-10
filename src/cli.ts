@@ -27,6 +27,7 @@ import {
 import {
   dim,
   errorText,
+  formatChain,
   formatStatus,
   heading,
   label,
@@ -42,7 +43,8 @@ import {
 import { RelayClient } from './relay-client.js';
 import { runBridge } from './bridge.js';
 import { runProxyCheck } from './proxy-check.js';
-import type { BridgeOptions } from './types.js';
+import type { BridgeOptions, RelayChain, RelayChainCurrency } from './types.js';
+import { MAJOR_EVM_CHAIN_PREFERENCE } from './constants.js';
 
 const program = new Command();
 
@@ -121,6 +123,10 @@ const walletCommand = program
   .command('wallet')
   .description('Local wallet helpers for inspecting configured signing credentials.');
 
+const tokenCommand = program
+  .command('token')
+  .description('Search Relay-supported tokens by name, symbol, or address fragment.');
+
 walletCommand
   .command('derive')
   .description('Derive one or more addresses from the configured mnemonic without making any network calls')
@@ -187,6 +193,88 @@ walletCommand
       console.log(
         `${label(`Index ${entry.addressIndex}:`)} ${entry.address}${active}`
       );
+    }
+  });
+
+tokenCommand
+  .command('search')
+  .description('Search Relay tokens by name or symbol')
+  .argument('<term>', 'Search term, for example wrapped ether')
+  .option('--chain <chain>', 'Restrict results to a chain name or chain id')
+  .option('--limit <count>', 'Maximum number of results to return', '10')
+  .option('--include-unverified', 'Include unverified tokens in results')
+  .action(async (term, options) => {
+    const relay = new RelayClient();
+    const limit = parsePositiveInteger(options.limit, 'limit');
+    const globalOptions = program.opts<{ json?: boolean }>();
+    const chains =
+      options.chain || !globalOptions.json ? (await relay.getChains()).chains : [];
+    const chain = options.chain
+      ? resolveCliChain(chains, options.chain, 'search chain')
+      : undefined;
+
+    const results = await relay.getCurrenciesV2({
+      term,
+      limit,
+      verified: options.includeUnverified ? undefined : true,
+      ...(chain ? { chainIds: [chain.id] } : {})
+    });
+
+    if (globalOptions.json) {
+      console.log(
+        JSON.stringify(
+          {
+            term,
+            chain: chain
+              ? {
+                  id: chain.id,
+                  name: chain.name,
+                  displayName: chain.displayName
+                }
+              : null,
+            results
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    console.log(heading('Token Search'));
+    console.log(`${label('Term:')} ${term}`);
+    if (chain) {
+      console.log(`${label('Chain:')} ${formatChain(chain)}`);
+    }
+    console.log(`${label('Results:')} ${results.length}`);
+
+    if (results.length === 0) {
+      console.log(dim('No matching tokens found.'));
+      return;
+    }
+
+    const chainMap = new Map<number, RelayChain>(
+      chains.map((candidate) => [candidate.id, candidate])
+    );
+
+    for (const currency of results) {
+      console.log('');
+      console.log(
+        `${label(currency.symbol)} ${dim(currency.name)}`
+      );
+      console.log(
+        `${label('Chain:')} ${formatCurrencyChain(currency, chainMap)}`
+      );
+      console.log(`${label('Address:')} ${currency.address}`);
+
+      const notes = [
+        currency.metadata?.verified ? 'verified' : 'unverified',
+        currency.metadata?.isNative ? 'native' : undefined,
+        currency.supportsBridging ? 'bridgeable' : undefined
+      ].filter(Boolean);
+      if (notes.length > 0) {
+        console.log(`${label('Flags:')} ${notes.join(', ')}`);
+      }
     }
   });
 
@@ -580,6 +668,15 @@ function parseNonNegativeInteger(value: string, labelText: string): number {
   return parsed;
 }
 
+function parsePositiveInteger(value: string, labelText: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${labelText} must be a positive integer.`);
+  }
+
+  return parsed;
+}
+
 function applyBridgeRouteShorthand(
   options: {
     from?: string;
@@ -625,4 +722,59 @@ function parseBridgeRouteToken(
   throw new Error(
     `Invalid ${labelText} route shorthand: ${value}. Use chain:token, for example arbitrum:weth.`
   );
+}
+
+function resolveCliChain(
+  chains: RelayChain[],
+  input: string,
+  labelText: string
+): RelayChain {
+  const evmChains = [...chains]
+    .filter((chain) => chain.vmType === 'evm' && !chain.disabled)
+    .sort((left, right) => {
+      const leftRank = MAJOR_EVM_CHAIN_PREFERENCE.indexOf(left.id);
+      const rightRank = MAJOR_EVM_CHAIN_PREFERENCE.indexOf(right.id);
+      return normalizeChainRank(leftRank) - normalizeChainRank(rightRank);
+    });
+
+  const normalized = input.toLowerCase();
+  const exactId = Number(input);
+
+  const match =
+    evmChains.find((chain) => chain.id === exactId) ??
+    evmChains.find((chain) =>
+      [
+        chain.name,
+        chain.displayName,
+        slugify(chain.name),
+        slugify(chain.displayName),
+        String(chain.id)
+      ].some((candidate) => candidate.toLowerCase() === normalized)
+    );
+
+  if (!match) {
+    throw new Error(`Unknown ${labelText}: ${input}.`);
+  }
+
+  return match;
+}
+
+function formatCurrencyChain(
+  currency: RelayChainCurrency,
+  chainMap: Map<number, RelayChain>
+): string {
+  if (typeof currency.chainId !== 'number') {
+    return 'unknown';
+  }
+
+  const chain = chainMap.get(currency.chainId);
+  return chain ? formatChain(chain) : String(currency.chainId);
+}
+
+function normalizeChainRank(rank: number): number {
+  return rank === -1 ? Number.MAX_SAFE_INTEGER : rank;
+}
+
+function slugify(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }

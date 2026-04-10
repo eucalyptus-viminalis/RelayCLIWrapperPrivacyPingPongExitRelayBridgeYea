@@ -7,6 +7,7 @@ import { ProxyHttpClient } from './proxy.js';
 import type {
   HttpMethod,
   RelayChain,
+  RelayChainCurrency,
   RelayOperation,
   RelayQuoteResponse,
   RelayStatusResponse
@@ -45,7 +46,7 @@ export class RelayClient {
   }
 
   async getCurrenciesV2(body: Record<string, unknown>) {
-    return this.request<Array<Record<string, unknown>>>({
+    return this.request<RelayChainCurrency[]>({
       method: 'POST',
       path: '/currencies/v2',
       body

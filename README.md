@@ -7,6 +7,7 @@ Every outbound HTTP request from the CLI is routed through an explicit proxy. Th
 ## What it does
 
 - Makes common EVM bridge flows simple with a single `bridge` command
+- Searches Relay-supported tokens by name or symbol with a simple `token search` command
 - Exposes the full Relay API surface through a spec-driven `api` command
 - Keeps signing secrets out of config files by storing only the environment variable names that should be used
 
@@ -37,7 +38,7 @@ pnpm dev -- --help
 The CLI never stores a raw private key or seed phrase. It only stores the env var names to read from.
 
 ```bash
-export RELAY_PRIVATE_KEY=0xyour_private_key
+export RELAY_PRIVATE_KEY=<your-private-key>
 pnpm relay -- config show
 ```
 
@@ -66,7 +67,7 @@ To point the CLI at a different env var:
 
 ```bash
 pnpm relay -- config set-private-key-env WALLET_PK
-export WALLET_PK=0xyour_private_key
+export WALLET_PK=<your-private-key>
 ```
 
 To point the CLI at a different mnemonic env var:
@@ -175,6 +176,13 @@ Browse the Relay API surface:
 ```bash
 pnpm relay -- api list
 pnpm relay -- api describe POST /quote/v2
+```
+
+Search tokens by name or symbol:
+
+```bash
+pnpm relay -- token search "wrapped ether" --chain arbitrum
+pnpm relay -- token search weth --limit 5
 ```
 
 Call any Relay endpoint:
